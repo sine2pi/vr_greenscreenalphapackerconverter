@@ -566,7 +566,7 @@ def _ceil_to(n: int, base: int) -> int:
     return ((n + base - 1) // base) * base
 
 @functools.lru_cache(maxsize=8)
-def get_circle_mask(size: int, video_args) -> str:
+def get_circle_mask(size) -> str:
 
     import tempfile
     from pathlib import Path
@@ -578,20 +578,13 @@ def get_circle_mask(size: int, video_args) -> str:
 
         scale = 4
         size_hr = size * scale
-        if video_args.debug is not None:
-            print(f"High-resolution mask size: {size_hr}")
+
         circle_img = Image.new("L", (size_hr, size_hr), 0)
 
         draw = ImageDraw.Draw(circle_img)
         draw.ellipse([0, 0, size_hr - 1, size_hr - 1], fill=255)
 
-        if video_args.debug is not None:
-            print(f" circle_img size before resize: {circle_img.size}")
-
         circle_img = circle_img.resize((size, size), Image.Resampling.LANCZOS)
-        if video_args.debug is not None:
-            print(f"Resized mask size: {size}")
-            print(f" circle_img size before blur: {circle_img.size}")
         circle_img = circle_img.filter(ImageFilter.GaussianBlur(radius=1))
         circle_img.save(str(mask_path))
 
@@ -752,7 +745,7 @@ def pack_video(
         print(f"Mask Gen Params: erode={erode_iters}, gblur={sigma:.2f}, contrast={contrast}, gamma={gamma}, tmix={tmix} (payload scale x{size_scale:.2f})")
         print(f"Adjusted overlay size: {overlay_size}")
 
-    circle_mask = get_circle_mask(overlay_size, video_args=video_args)
+    circle_mask = get_circle_mask(overlay_size)
 
     filter_parts: list[str] = [
 
