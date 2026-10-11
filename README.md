@@ -13,6 +13,5 @@ To turn the videos that are in the videos folder into 180 sbs fisheye videos wit
      python pipeline.py "Videos" --alpha True --fisheye180 True
 
 
+These scripts are intended for high quality 4-8k VR matting as a suitable replacement for the real thing. This is not a real-time AI passthrough replacement or equivalent.
 
-^There are many flags and arguments some of which work really well.. the others flags are bad ideas that need to be removed eventually.
-*^You probably should already know and regularly use all the required dependencies.
