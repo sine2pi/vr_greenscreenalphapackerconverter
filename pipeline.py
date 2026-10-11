@@ -566,7 +566,7 @@ def _ceil_to(n: int, base: int) -> int:
     return ((n + base - 1) // base) * base
 
 @functools.lru_cache(maxsize=8)
-def get_circle_mask(size: int) -> str:
+def get_circle_mask(size: int, video_args) -> str:
 
     import tempfile
     from pathlib import Path
@@ -578,17 +578,20 @@ def get_circle_mask(size: int) -> str:
 
         scale = 4
         size_hr = size * scale
-        print(f"High-resolution mask size: {size_hr}")
+        if video_args.debug is not None:
+            print(f"High-resolution mask size: {size_hr}")
         circle_img = Image.new("L", (size_hr, size_hr), 0)
 
         draw = ImageDraw.Draw(circle_img)
         draw.ellipse([0, 0, size_hr - 1, size_hr - 1], fill=255)
 
-        print(f" circle_img size before resize: {circle_img.size}")
+        if video_args.debug is not None:
+            print(f" circle_img size before resize: {circle_img.size}")
 
         circle_img = circle_img.resize((size, size), Image.Resampling.LANCZOS)
-        print(f"Resized mask size: {size}")
-        print(f" circle_img size before blur: {circle_img.size}")
+        if video_args.debug is not None:
+            print(f"Resized mask size: {size}")
+            print(f" circle_img size before blur: {circle_img.size}")
         circle_img = circle_img.filter(ImageFilter.GaussianBlur(radius=1))
         circle_img.save(str(mask_path))
 
@@ -702,7 +705,8 @@ def pack_video(
     overlay_size = int(out_h * 0.4)
     overlay_size = (overlay_size // 4) * 4
     half_overlay = overlay_size // 2
-    print(f"Half overlay size: {half_overlay}, overlay size: {overlay_size}, out_w: {out_w}, out_h: {out_h}")
+    if video_args.debug is not None:
+        print(f"Half overlay size: {half_overlay}, overlay size: {overlay_size}, out_w: {out_w}, out_h: {out_h}")
 
     if data['height'] <= 2400:
         default_contrast, default_gamma = 2.0, 1.2
@@ -744,9 +748,11 @@ def pack_video(
     else:
         mask_prep = f"{mask_src}split=2[mask1][mask2]"
 
-    print(f"Mask Gen Params: erode={erode_iters}, gblur={sigma:.2f}, contrast={contrast}, gamma={gamma}, tmix={tmix} (payload scale x{size_scale:.2f})")
-    print(f"Adjusted overlay size: {overlay_size}")
-    circle_mask = get_circle_mask(overlay_size)
+    if video_args.debug is not None:
+        print(f"Mask Gen Params: erode={erode_iters}, gblur={sigma:.2f}, contrast={contrast}, gamma={gamma}, tmix={tmix} (payload scale x{size_scale:.2f})")
+        print(f"Adjusted overlay size: {overlay_size}")
+
+    circle_mask = get_circle_mask(overlay_size, video_args=video_args)
 
     filter_parts: list[str] = [
 
@@ -1304,7 +1310,8 @@ class sam3_video_inference:
         for m in vits:
             m.set_ignore_pixels(ignore if want_vit else None)
         if ignore is not None:
-            print(f"token drop: {ignore.mean() * 100:.1f}% pixels ignored (vit={want_vit}, encoder={want_enc}, decoder={want_dec})")
+            if self.video_args.debug is not None:
+                print(f"token drop: {ignore.mean() * 100:.1f}% pixels ignored (vit={want_vit}, encoder={want_enc}, decoder={want_dec})")
 
     def clear_ignored_masks(self, out):
    
@@ -1533,7 +1540,6 @@ class sam3_video_inference:
             predictor.shutdown()
 
         del predictor
-
         return scores, masks
 
     @staticmethod
@@ -2041,6 +2047,9 @@ def matanyone(
                 right_pha = matte(seg, 'right', frames[..., th:], seg.right_mask_path, n * 2 + 2)
                 del frames
 
+                if video_args.debug is not None:
+                    stereo_matte_report(left_pha, right_pha, f'seg{seg.index:02d}')
+
                 pha = torch.cat([left_pha, right_pha], dim=-1)
             else:
                 frames = decode_segment(video_args.video_path, seg.start_time, seg.end_time, th * 2, th, keyframe_start)
@@ -2050,7 +2059,8 @@ def matanyone(
             t0 = time.perf_counter()
             for frame in pha:
                 writer.write(frame)
-            print(f"seg{seg.index:02d}: wrote {len(pha)} mask frames in {time.perf_counter() - t0:.1f}s")
+                if video_args.debug is not None:
+                    print(f"seg{seg.index:02d}: wrote {len(pha)} mask frames in {time.perf_counter() - t0:.1f}s")
             seg.video_path = output_mask
 
             gc.collect()
@@ -2222,8 +2232,8 @@ def process_video(video_path, args: argparse.Namespace, temp_root: Path) -> str:
         f.write(f'# {video_name}\n')
         for seg in segments:
             f.write(f'{seg.index},{seg.seg_type.value},{seg.start_time:.3f},{seg.end_time:.3f},{seg.video_path}\n')
-
-    print(f"info() cache: {info.cache_info()}")
+    if video_args.debug is not None:
+        print(f"info() cache: {info.cache_info()}")
     return output_mask
 
 def calculate_segments(video_duration: float, max_segment_length: float = 5.0, debug = None, frames: int = 0, fps: float = 0.0, segment_frames: int = 0, keyframes: list[float] | None = None) -> List[SegmentInfo]:
@@ -2299,8 +2309,8 @@ def extract_segments(
             extract_first_frame(video_args.video_path, seg.start_time, seg.end_time, th * 2, th,
                                 [(seg.left_frame_path, f'crop={th}:{th}:0:0'),
                                  (seg.right_frame_path, f'crop={th}:{th}:{th}:0')], keyframe_start)
-
-        print(f'[timing] segment {seg.index} extract: {time.perf_counter() - seg_t0:.2f}s')
+        if video_args.debug is not None:
+            print(f'[timing] segment {seg.index} extract: {time.perf_counter() - seg_t0:.2f}s')
     return mask_segments
 
 def main() -> int:
@@ -2311,14 +2321,14 @@ def main() -> int:
     parser.add_argument("--matanyone-height", type=int, default=1008)
     parser.add_argument("--sam3-height", type=int, default=1008)
     parser.add_argument("--sam3-chunk", type=int, default=600, help="Max frames per SAM3 session (frees GPU memory between chunks)")
-    parser.add_argument("--segment-length", type=float, default=1)
+    parser.add_argument("--segment-length", type=float, default=5)
     parser.add_argument("--erode", type=int, default=0)
     parser.add_argument("--dilate", type=int, default=0)
     parser.add_argument("--prompt", type=str, default="agirl")
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--add-box", type=bool, default=False)
     parser.add_argument("--sub-box", type=bool, default=False)
-    parser.add_argument("--ignore-bottom", type=float, default=0.2, metavar='FRAC', help='Fraction (0-1) of each frame, measured from the bottom, that SAM3 should ignore (blanked in the model input and cleared from its masks)')
+    parser.add_argument("--ignore-bottom", type=float, default=0.1, metavar='FRAC', help='Fraction (0-1) of each frame, measured from the bottom, that SAM3 should ignore (blanked in the model input and cleared from its masks)')
     parser.add_argument("--ignore-left", type=float, default=0.15, metavar='FRAC', help='Fraction (0-1) of each frame, measured from the left, that SAM3 should ignore')
     parser.add_argument("--ignore-right", type=float, default=0.15, metavar='FRAC', help='Fraction (0-1) of each frame, measured from the right, that SAM3 should ignore')
     parser.add_argument("--ignore-static", type=float, default=0.0, metavar='THRESH', help='Ignore border-connected pixels whose value never changes by more than THRESH (0-1 pixel units, e.g. 0.04) across the SAM3 seed frames; 0 disables')
@@ -2346,7 +2356,7 @@ def main() -> int:
     parser.add_argument('--alpha-blur', type=float, default=1.8, help='Alpha pack matte feather (gblur sigma at --alpha-ref-size payload size; 0 = off)')
     parser.add_argument('--alpha-contrast', type=float, default=None, help='Alpha pack matte contrast (default: 2.0 up to 2400px high, else 2.5; 1.0 = off)')
     parser.add_argument('--alpha-gamma', type=float, default=None, help='Alpha pack matte gamma (default: 1.2 up to 2400px high, else 1.4; 1.0 = off)')
-    parser.add_argument('--alpha-ref-size', type=int, default=1024, help='Payload size in px that --alpha-erode/--alpha-blur refer to; they scale with the real payload size (0 = no scaling)')
+    parser.add_argument('--alpha-ref-size', type=int, default=1408, help='Payload size in px that --alpha-erode/--alpha-blur refer to; they scale with the real payload size (0 = no scaling)')
     parser.add_argument('--alpha-tmix', type=int, default=1, help='Odd number of frames to average the matte over before packing (1 = off)')
     parser.add_argument('--show-plots', type=bool, default=False, help='Sam3 mask plots will be displayed if True.')
     parser.add_argument('--fisheye180', type=bool, default=False, help='Convert video or folder to SBS fisheye180. Works with alphapacker')
