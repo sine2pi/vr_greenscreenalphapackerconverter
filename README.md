@@ -12,6 +12,6 @@ To turn the videos that are in the videos folder into greenscreen videos:
 To turn the videos that are in the videos folder into 180 sbs fisheye videos with an alpha packed mask ready for passthrough in deovr use: 
      python pipeline.py "Videos" --alpha True --fisheye180 True
 
-Added funscript functioning. The --funscript flag now creates a useable accurate funscript with all the other things.
+
 These scripts are intended for high quality 4-8k VR matting as a suitable replacement for the real thing. This is not a real-time AI passthrough replacement or equivalent.
 
