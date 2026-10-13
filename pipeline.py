@@ -1375,13 +1375,14 @@ class sam3_video_inference:
         self.blank_ignored(session_id)
    
         if add_box and not sub_box:
-            boxes = np.array([[W  * 0.2, H * 0.2, W  * 0.45, H * 0.45]])
+            boxes = np.array([[W  * 0.1, H * 0.1, W  * 0.8, H * 0.8]])
             labels = np.array([1])
             boxes = torch.tensor(
                 self.abs_to_rel_coords(boxes, W, H, coord_type="box"),
                 dtype=torch.float32,
             )
             labels = torch.tensor(labels, dtype=torch.int32)
+            print(f'add_box: {boxes=}, {labels=}')
 
         if sub_box and not add_box:
             boxes = np.array([[0, H * 0.9, W, H * 0.1]])
@@ -1391,6 +1392,7 @@ class sam3_video_inference:
                 dtype=torch.float32,
             )
             labels = torch.tensor(labels, dtype=torch.int32)
+            print(f'sub_box: {boxes=}, {labels=}')
 
         if add_box and sub_box:
             boxes = np.array([
@@ -1404,6 +1406,7 @@ class sam3_video_inference:
                 dtype=torch.float32,
             )
             labels = torch.tensor(labels, dtype=torch.int32)
+            print(f'add_box and sub_box: {boxes=}, {labels=}')
          
         prompt_text = prompt if prompt is not None else None
         frame_idx = 0
@@ -1992,6 +1995,51 @@ class MaskWriter:
                 raise RuntimeError(f"Mask encode failed: {self.path}")
         return self.path
 
+def matte_y(pha: torch.Tensor) -> np.ndarray:
+    # Vertical centroid of each matte frame as a 0-1 fraction of frame height (0 = top); NaN if the matte is empty.
+    rows = pha.sum(dim=-1, dtype=torch.float32)
+    total = rows.sum(dim=-1)
+    ys = (rows * torch.arange(rows.shape[-1], dtype=torch.float32)).sum(dim=-1) / total.clamp_min(1e-6) / rows.shape[-1]
+    ys[total <= 0] = float('nan')
+    return ys.numpy()
+
+def funscript_actions(ys, fps: float, smooth_sec: float = 0.05) -> list[dict]:
+    # Records when the vertical position changes and what it changes to (0-100, 100 = top of frame).
+    y = -np.asarray(ys, dtype=np.float64)
+    ok = ~np.isnan(y)
+    if ok.sum() < 2:
+        return []
+    idx = np.arange(len(y))
+    y = np.interp(idx, idx[ok], y[ok])
+
+    k = max(1, int(round(smooth_sec * fps)) | 1)
+    if k > 1:
+        pad = np.pad(y, k // 2, mode='edge')
+        y = np.convolve(pad, np.ones(k) / k, mode='valid')
+
+    lo, hi = np.percentile(y, [2, 98])
+    if hi - lo <= 1e-9:
+        return []
+    pos = np.rint(np.clip((y - lo) / (hi - lo) * 100.0, 0, 100)).astype(int)
+
+    # A player interpolates between keyframes, so a held position needs a point where the hold ends or the next change would ramp across it.
+    keys = [0]
+    for i in range(1, len(pos)):
+        if pos[i] != pos[keys[-1]]:
+            if i - 1 != keys[-1]:
+                keys.append(i - 1)
+            keys.append(i)
+    if keys[-1] != len(pos) - 1:
+        keys.append(len(pos) - 1)
+    return [{'at': int(round(i / fps * 1000)), 'pos': int(pos[i])} for i in keys]
+
+def write_funscript(ys, fps: float, path) -> str:
+    actions = funscript_actions(ys, fps)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump({'version': '1.0', 'inverted': False, 'range': 100, 'actions': actions}, f, separators=(',', ':'))
+    print(f"Funscript: {path} ({len(actions)} actions)")
+    return str(path)
+
 def matanyone(
             video_args: argparse.Namespace,
             segments_dir: Path, 
@@ -2020,7 +2068,7 @@ def matanyone(
     keyframe_start = bool(getattr(video_args, 'keyframe_segments', False))
     output_mask = str(segments_dir / f'{Path(video_args.video_path).stem}_mask{MASK_EXT}')
     writer = MaskWriter(output_mask, data['fps_str'])
-
+    matte_ys = []
     def matte(seg, eye, frames, mask_path, op):
         nonlocal first
         _update_status(op, total * 2, f'seg{seg.index:02d}_{eye}', seg.end_time - seg.start_time)
@@ -2050,6 +2098,8 @@ def matanyone(
                 del frames
 
             t0 = time.perf_counter()
+            if getattr(video_args, 'funscript', False):
+                matte_ys.append(matte_y(pha))
             for frame in pha:
                 writer.write(frame)
                 if video_args.debug is not None:
@@ -2060,6 +2110,9 @@ def matanyone(
             torch.cuda.empty_cache()
     finally:
         writer.close()
+
+    if matte_ys:
+        write_funscript(np.concatenate(matte_ys), data['fps'], Path(video_args.video_path).with_suffix('.funscript'))
 
     sys.stderr.write("\n")
     return segments, output_mask
@@ -2314,18 +2367,18 @@ def main() -> int:
     parser.add_argument("--matanyone-height", type=int, default=1008)
     parser.add_argument("--sam3-height", type=int, default=1008)
     parser.add_argument("--sam3-chunk", type=int, default=600, help="Max frames per SAM3 session (frees GPU memory between chunks)")
-    parser.add_argument("--segment-length", type=float, default=5)
+    parser.add_argument("--segment-length", type=float, default=10)
     parser.add_argument("--erode", type=int, default=0)
     parser.add_argument("--dilate", type=int, default=0)
-    parser.add_argument("--prompt", type=str, default="agirl")
+    parser.add_argument("--prompt", type=str, default="girl")
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--add-box", type=bool, default=False)
     parser.add_argument("--sub-box", type=bool, default=False)
     parser.add_argument("--ignore-bottom", type=float, default=0.1, metavar='FRAC', help='Fraction (0-1) of each frame, measured from the bottom, that SAM3 should ignore (blanked in the model input and cleared from its masks)')
-    parser.add_argument("--ignore-left", type=float, default=0.15, metavar='FRAC', help='Fraction (0-1) of each frame, measured from the left, that SAM3 should ignore')
-    parser.add_argument("--ignore-right", type=float, default=0.15, metavar='FRAC', help='Fraction (0-1) of each frame, measured from the right, that SAM3 should ignore')
-    parser.add_argument("--ignore-static", type=float, default=0.0, metavar='THRESH', help='Ignore border-connected pixels whose value never changes by more than THRESH (0-1 pixel units, e.g. 0.04) across the SAM3 seed frames; 0 disables')
-    parser.add_argument("--static-margin", type=int, default=0, metavar='PX', help='Shrink the static region by PX pixels (at SAM3 resolution) to keep it away from the subject')
+    parser.add_argument("--ignore-left", type=float, default=0.1, metavar='FRAC', help='Fraction (0-1) of each frame, measured from the left, that SAM3 should ignore')
+    parser.add_argument("--ignore-right", type=float, default=0.1, metavar='FRAC', help='Fraction (0-1) of each frame, measured from the right, that SAM3 should ignore')
+    parser.add_argument("--ignore-static", type=float, default=0.008, metavar='THRESH', help='Ignore border-connected pixels whose value never changes by more than THRESH (0-1 pixel units, e.g. 0.04) across the SAM3 seed frames; 0 disables')
+    parser.add_argument("--static-margin", type=int, default=16, metavar='PX', help='Shrink the static region by PX pixels (at SAM3 resolution) to keep it away from the subject')
     parser.add_argument("--blank-matanyone", action='store_true', help='Fill the ignored area of MatAnyone2 input frames with flat gray, keeping the full frame size (no speedup, no geometry change)')
     parser.add_argument("--crop-matanyone", action='store_true', help='Run MatAnyone2 only on the bounding box of the non-ignored area (multiple of 16); alpha is pasted back into a full-size zero frame. Needs --ignore-* or --ignore-static')
     parser.add_argument("--drop-tokens-enc", action='store_true', help='Experimental: also skip fully ignored patches in the SAM3 fusion encoder (can change boxes)')
@@ -2349,15 +2402,19 @@ def main() -> int:
     parser.add_argument('--alpha-blur', type=float, default=1.8, help='Alpha pack matte feather (gblur sigma at --alpha-ref-size payload size; 0 = off)')
     parser.add_argument('--alpha-contrast', type=float, default=None, help='Alpha pack matte contrast (default: 2.0 up to 2400px high, else 2.5; 1.0 = off)')
     parser.add_argument('--alpha-gamma', type=float, default=None, help='Alpha pack matte gamma (default: 1.2 up to 2400px high, else 1.4; 1.0 = off)')
-    parser.add_argument('--alpha-ref-size', type=int, default=1408, help='Payload size in px that --alpha-erode/--alpha-blur refer to; they scale with the real payload size (0 = no scaling)')
+    parser.add_argument('--alpha-ref-size', type=int, default=1008, help='Payload size in px that --alpha-erode/--alpha-blur refer to; they scale with the real payload size (0 = no scaling)')
     parser.add_argument('--alpha-tmix', type=int, default=1, help='Odd number of frames to average the matte over before packing (1 = off)')
     parser.add_argument('--show-plots', type=bool, default=False, help='Sam3 mask plots will be displayed if True.')
     parser.add_argument('--fisheye180', type=bool, default=False, help='Convert video or folder to SBS fisheye180. Works with alphapacker')
     parser.add_argument('--keyframe-segments', action='store_true', help='Split at the video\'s own keyframes: one segment per keyframe-to-keyframe span (lengths vary; overrides --segment-frames/--segment-length) and seek without pre-roll decoding')
     parser.add_argument('--segment-frames', type=int, default=None, metavar='N', help='Split into segments of exactly N frames each (overrides --segment-length; a final remainder shorter than N is kept as its own segment)')
+    parser.add_argument('--funscript', action='store_true', help='Also write <name>.funscript next to the source: vertical position of the matte over time (0-100), a keyframe at every change')
     parser.add_argument('--debug', type=int, default=None, help='Debug mode: process only the first N segments')
     args = parser.parse_args()
     args.matanyone_version = str(args.matanyone_version).lower()
+
+    if args.debug is not None:
+        args.show_plots = True
 
     if args.ma2_mem_every is not None and args.ma2_mem_every < 1:
         raise ValueError('--ma2-mem-every must be >= 1')
@@ -2386,9 +2443,9 @@ def main() -> int:
     for index, video_path in enumerate(video_paths, 1):
         video_path = str(video_path)
         video_args = argparse.Namespace(**vars(args), video_path=video_path)
-        is_vfr = check_vfr(video_path)
-        if is_vfr:
-            video_path = cfr_video(video_path, video_args) 
+        # is_vfr = check_vfr(video_path)
+        # if is_vfr:
+        #     video_path = cfr_video(video_path, video_args) 
         output_mask = process_video(video_path, args, temp_root)
         processed.append((video_path, output_mask))
     for video_path, output_mask in processed:
@@ -2402,3 +2459,65 @@ def main() -> int:
 
 if __name__ == '__main__':
     sys.exit(main())
+
+# class raft_flow:
+#     def __init__(self, device, max_size=1008, flow_scale=1.0, interp_mode="bicubic"):
+
+#         self.max_size = max_size
+#         self.flow_scale = flow_scale
+#         self.interp_mode = interp_mode
+#         self.weights = Raft_Small_Weights.DEFAULT
+#         self.model = raft_small(weights=Raft_Small_Weights.DEFAULT, progress=False).to(device).eval()
+#         self.transforms = self.weights.transforms()     
+ 
+#     def compute_raft_flow(self, img1a, img2a, max_size, scale, interp_mode, target_size):
+
+#         origH, origW =  torchvision.transforms.functional.get_image_size(img1a)
+#         current_H, current_W = origH * scale, origW * scale 
+
+#         if max(current_H, current_W) > max_size:
+#             scale = scale * (max_size / float(max(current_H, current_W)))
+
+#         if scale != 1.0:
+#             newH, newW = int(origH * scale), int(origW * scale)
+#             img1b = torch.nn.functional.interpolate(img1a, size=(newH, newW), mode=interp_mode, antialias=True)
+#             img2b = torch.nn.functional.interpolate(img2a, size=(newH, newW), mode=interp_mode, antialias=True)
+#         else:
+#             newH, newW = origH, origW
+#             img1b, img2b = img1a, img2a
+
+#         img1c, img2c = self.transforms(img1b, img2b)
+#         _, _, H_s, W_s = img1c.shape
+#         padh, padw = (8 - H_s % 8) % 8, (8 - W_s % 8) % 8
+
+#         if padh > 0 or padw > 0:
+#             img1c = torch.nn.functional.pad(img1c, (0, padw, 0, padh))
+#             img2c = torch.nn.functional.pad(img2c, (0, padw, 0, padh))
+
+#         flow = self.model(img1c, img2c)[-1].float()
+#         if padh > 0 or padw > 0:
+#             flow = flow[:, :, :H_s, :W_s]
+
+#         out_H, out_W = target_size if target_size else (origH, origW)
+#         if out_H != H_s:
+#             flow = torch.nn.functional.interpolate(flow, size=(out_H, out_W), mode=interp_mode, antialias=True)
+
+#         flow[:, 0] *= (out_W / W_s)
+#         flow[:, 1] *= (out_H / H_s)
+                
+#         return flow
+
+#     def warp_frame(self, a, b, scale=1.0, mode="linear", N=None):
+    
+#         if a.ndim == 3: 
+#             C, H, W = a.shape 
+#         if a.ndim == 4: 
+#             N, C, H, W = a.shape
+        
+#         scaled = b * scale
+#         y, x = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device), indexing='ij')
+#         x_norm = 2.0 * (x + scaled[0]) / max(W - 1, 1) - 1.0
+#         y_norm = 2.0 * (y + scaled[1]) / max(H - 1, 1) - 1.0
+#         grid = torch.stack((x_norm, y_norm), dim=-1).unsqueeze(0)
+#         grid = grid.expand(N, -1, -1, -1) if have(N) else grid
+#         return torch.nn.functional.grid_sample(a, grid, mode=mode, padding_mode='border', align_corners=True) if have(N) else torch.nn.functional.grid_sample(a.unsqueeze(0), grid, mode=mode, padding_mode='border', align_corners=True).squeeze(0)
