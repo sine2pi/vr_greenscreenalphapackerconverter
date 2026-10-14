@@ -1995,48 +1995,6 @@ class MaskWriter:
                 raise RuntimeError(f"Mask encode failed: {self.path}")
         return self.path
 
-def matte_y(pha: torch.Tensor) -> np.ndarray:
-    rows = pha.sum(dim=-1, dtype=torch.float32)
-    total = rows.sum(dim=-1)
-    ys = (rows * torch.arange(rows.shape[-1], dtype=torch.float32)).sum(dim=-1) / total.clamp_min(1e-6) / rows.shape[-1]
-    ys[total <= 0] = float('nan')
-    return ys.numpy()
-
-def funscript_actions(ys, fps: float, smooth_sec: float = 0.05) -> list[dict]:
-    y = -np.asarray(ys, dtype=np.float64)
-    ok = ~np.isnan(y)
-    if ok.sum() < 2:
-        return []
-    idx = np.arange(len(y))
-    y = np.interp(idx, idx[ok], y[ok])
-
-    k = max(1, int(round(smooth_sec * fps)) | 1)
-    if k > 1:
-        pad = np.pad(y, k // 2, mode='edge')
-        y = np.convolve(pad, np.ones(k) / k, mode='valid')
-
-    lo, hi = np.percentile(y, [2, 98])
-    if hi - lo <= 1e-9:
-        return []
-    pos = np.rint(np.clip((y - lo) / (hi - lo) * 100.0, 0, 100)).astype(int)
-
-    keys = [0]
-    for i in range(1, len(pos)):
-        if pos[i] != pos[keys[-1]]:
-            if i - 1 != keys[-1]:
-                keys.append(i - 1)
-            keys.append(i)
-    if keys[-1] != len(pos) - 1:
-        keys.append(len(pos) - 1)
-    return [{'at': int(round(i / fps * 1000)), 'pos': int(pos[i])} for i in keys]
-
-def write_funscript(ys, fps: float, path) -> str:
-    actions = funscript_actions(ys, fps)
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump({'version': '1.0', 'inverted': False, 'range': 100, 'actions': actions}, f, separators=(',', ':'))
-    print(f"Funscript: {path} ({len(actions)} actions)")
-    return str(path)
-
 def matanyone(
             video_args: argparse.Namespace,
             segments_dir: Path, 
@@ -2065,7 +2023,7 @@ def matanyone(
     keyframe_start = bool(getattr(video_args, 'keyframe_segments', False))
     output_mask = str(segments_dir / f'{Path(video_args.video_path).stem}_mask{MASK_EXT}')
     writer = MaskWriter(output_mask, data['fps_str'])
-    matte_ys = []
+
     def matte(seg, eye, frames, mask_path, op):
         nonlocal first
         _update_status(op, total * 2, f'seg{seg.index:02d}_{eye}', seg.end_time - seg.start_time)
@@ -2095,8 +2053,6 @@ def matanyone(
                 del frames
 
             t0 = time.perf_counter()
-            if getattr(video_args, 'funscript', False):
-                matte_ys.append(matte_y(pha))
             for frame in pha:
                 writer.write(frame)
                 if video_args.debug is not None:
@@ -2107,9 +2063,6 @@ def matanyone(
             torch.cuda.empty_cache()
     finally:
         writer.close()
-
-    if matte_ys:
-        write_funscript(np.concatenate(matte_ys), data['fps'], Path(video_args.video_path).with_suffix('.funscript'))
 
     sys.stderr.write("\n")
     return segments, output_mask
@@ -2364,7 +2317,7 @@ def main() -> int:
     parser.add_argument("--matanyone-height", type=int, default=1280)
     parser.add_argument("--sam3-height", type=int, default=1280)
     parser.add_argument("--sam3-chunk", type=int, default=600, help="Max frames per SAM3 session (frees GPU memory between chunks)")
-    parser.add_argument("--segment-length", type=float, default=2)
+    parser.add_argument("--segment-length", type=float, default=10)
     parser.add_argument("--erode", type=int, default=0)
     parser.add_argument("--dilate", type=int, default=0)
     parser.add_argument("--prompt", type=str, default="girl")
@@ -2405,7 +2358,6 @@ def main() -> int:
     parser.add_argument('--fisheye180', type=bool, default=False, help='Convert video or folder to SBS fisheye180. Works with alphapacker')
     parser.add_argument('--keyframe-segments', action='store_true', help='Split at the video\'s own keyframes: one segment per keyframe-to-keyframe span (lengths vary; overrides --segment-frames/--segment-length) and seek without pre-roll decoding')
     parser.add_argument('--segment-frames', type=int, default=None, metavar='N', help='Split into segments of exactly N frames each (overrides --segment-length; a final remainder shorter than N is kept as its own segment)')
-    parser.add_argument('--funscript', action='store_true', help='Also write <name>.funscript next to the source: vertical position of the matte over time (0-100), a keyframe at every change')
     parser.add_argument('--debug', type=int, default=None, help='Debug mode: process only the first N segments')
     args = parser.parse_args()
     args.matanyone_version = str(args.matanyone_version).lower()
@@ -2440,6 +2392,9 @@ def main() -> int:
     for index, video_path in enumerate(video_paths, 1):
         video_path = str(video_path)
         video_args = argparse.Namespace(**vars(args), video_path=video_path)
+        is_vfr = check_vfr(video_path)
+        if is_vfr:
+            video_path = cfr_video(video_path, video_args) 
         output_mask = process_video(video_path, args, temp_root)
         processed.append((video_path, output_mask))
     for video_path, output_mask in processed:
@@ -2453,4 +2408,3 @@ def main() -> int:
 
 if __name__ == '__main__':
     sys.exit(main())
-
