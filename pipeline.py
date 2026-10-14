@@ -1996,7 +1996,6 @@ class MaskWriter:
         return self.path
 
 def matte_y(pha: torch.Tensor) -> np.ndarray:
-    # Vertical centroid of each matte frame as a 0-1 fraction of frame height (0 = top); NaN if the matte is empty.
     rows = pha.sum(dim=-1, dtype=torch.float32)
     total = rows.sum(dim=-1)
     ys = (rows * torch.arange(rows.shape[-1], dtype=torch.float32)).sum(dim=-1) / total.clamp_min(1e-6) / rows.shape[-1]
@@ -2004,7 +2003,6 @@ def matte_y(pha: torch.Tensor) -> np.ndarray:
     return ys.numpy()
 
 def funscript_actions(ys, fps: float, smooth_sec: float = 0.05) -> list[dict]:
-    # Records when the vertical position changes and what it changes to (0-100, 100 = top of frame).
     y = -np.asarray(ys, dtype=np.float64)
     ok = ~np.isnan(y)
     if ok.sum() < 2:
@@ -2022,7 +2020,6 @@ def funscript_actions(ys, fps: float, smooth_sec: float = 0.05) -> list[dict]:
         return []
     pos = np.rint(np.clip((y - lo) / (hi - lo) * 100.0, 0, 100)).astype(int)
 
-    # A player interpolates between keyframes, so a held position needs a point where the hold ends or the next change would ramp across it.
     keys = [0]
     for i in range(1, len(pos)):
         if pos[i] != pos[keys[-1]]:
@@ -2364,21 +2361,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="VR Video Masking and things and stuff")
     parser.add_argument("--model", type=str, default="sam3.1")
     parser.add_argument("input_path", type=str, default="videos")
-    parser.add_argument("--matanyone-height", type=int, default=1008)
-    parser.add_argument("--sam3-height", type=int, default=1008)
+    parser.add_argument("--matanyone-height", type=int, default=1280)
+    parser.add_argument("--sam3-height", type=int, default=1280)
     parser.add_argument("--sam3-chunk", type=int, default=600, help="Max frames per SAM3 session (frees GPU memory between chunks)")
-    parser.add_argument("--segment-length", type=float, default=10)
+    parser.add_argument("--segment-length", type=float, default=2)
     parser.add_argument("--erode", type=int, default=0)
     parser.add_argument("--dilate", type=int, default=0)
     parser.add_argument("--prompt", type=str, default="girl")
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--add-box", type=bool, default=False)
     parser.add_argument("--sub-box", type=bool, default=False)
-    parser.add_argument("--ignore-bottom", type=float, default=0.1, metavar='FRAC', help='Fraction (0-1) of each frame, measured from the bottom, that SAM3 should ignore (blanked in the model input and cleared from its masks)')
-    parser.add_argument("--ignore-left", type=float, default=0.1, metavar='FRAC', help='Fraction (0-1) of each frame, measured from the left, that SAM3 should ignore')
-    parser.add_argument("--ignore-right", type=float, default=0.1, metavar='FRAC', help='Fraction (0-1) of each frame, measured from the right, that SAM3 should ignore')
-    parser.add_argument("--ignore-static", type=float, default=0.008, metavar='THRESH', help='Ignore border-connected pixels whose value never changes by more than THRESH (0-1 pixel units, e.g. 0.04) across the SAM3 seed frames; 0 disables')
-    parser.add_argument("--static-margin", type=int, default=16, metavar='PX', help='Shrink the static region by PX pixels (at SAM3 resolution) to keep it away from the subject')
+    parser.add_argument("--ignore-bottom", type=float, default=0.0, metavar='FRAC', help='Fraction (0-1) of each frame, measured from the bottom, that SAM3 should ignore (blanked in the model input and cleared from its masks)')
+    parser.add_argument("--ignore-left", type=float, default=0.0, metavar='FRAC', help='Fraction (0-1) of each frame, measured from the left, that SAM3 should ignore')
+    parser.add_argument("--ignore-right", type=float, default=0.0, metavar='FRAC', help='Fraction (0-1) of each frame, measured from the right, that SAM3 should ignore')
+    parser.add_argument("--ignore-static", type=float, default=0.0, metavar='THRESH', help='Ignore border-connected pixels whose value never changes by more than THRESH (0-1 pixel units, e.g. 0.04) across the SAM3 seed frames; 0 disables')
+    parser.add_argument("--static-margin", type=int, default=0, metavar='PX', help='Shrink the static region by PX pixels (at SAM3 resolution) to keep it away from the subject')
     parser.add_argument("--blank-matanyone", action='store_true', help='Fill the ignored area of MatAnyone2 input frames with flat gray, keeping the full frame size (no speedup, no geometry change)')
     parser.add_argument("--crop-matanyone", action='store_true', help='Run MatAnyone2 only on the bounding box of the non-ignored area (multiple of 16); alpha is pasted back into a full-size zero frame. Needs --ignore-* or --ignore-static')
     parser.add_argument("--drop-tokens-enc", action='store_true', help='Experimental: also skip fully ignored patches in the SAM3 fusion encoder (can change boxes)')
@@ -2402,7 +2399,7 @@ def main() -> int:
     parser.add_argument('--alpha-blur', type=float, default=1.8, help='Alpha pack matte feather (gblur sigma at --alpha-ref-size payload size; 0 = off)')
     parser.add_argument('--alpha-contrast', type=float, default=None, help='Alpha pack matte contrast (default: 2.0 up to 2400px high, else 2.5; 1.0 = off)')
     parser.add_argument('--alpha-gamma', type=float, default=None, help='Alpha pack matte gamma (default: 1.2 up to 2400px high, else 1.4; 1.0 = off)')
-    parser.add_argument('--alpha-ref-size', type=int, default=1008, help='Payload size in px that --alpha-erode/--alpha-blur refer to; they scale with the real payload size (0 = no scaling)')
+    parser.add_argument('--alpha-ref-size', type=int, default=1280, help='Payload size in px that --alpha-erode/--alpha-blur refer to; they scale with the real payload size (0 = no scaling)')
     parser.add_argument('--alpha-tmix', type=int, default=1, help='Odd number of frames to average the matte over before packing (1 = off)')
     parser.add_argument('--show-plots', type=bool, default=False, help='Sam3 mask plots will be displayed if True.')
     parser.add_argument('--fisheye180', type=bool, default=False, help='Convert video or folder to SBS fisheye180. Works with alphapacker')
@@ -2443,9 +2440,6 @@ def main() -> int:
     for index, video_path in enumerate(video_paths, 1):
         video_path = str(video_path)
         video_args = argparse.Namespace(**vars(args), video_path=video_path)
-        # is_vfr = check_vfr(video_path)
-        # if is_vfr:
-        #     video_path = cfr_video(video_path, video_args) 
         output_mask = process_video(video_path, args, temp_root)
         processed.append((video_path, output_mask))
     for video_path, output_mask in processed:
@@ -2460,64 +2454,3 @@ def main() -> int:
 if __name__ == '__main__':
     sys.exit(main())
 
-# class raft_flow:
-#     def __init__(self, device, max_size=1008, flow_scale=1.0, interp_mode="bicubic"):
-
-#         self.max_size = max_size
-#         self.flow_scale = flow_scale
-#         self.interp_mode = interp_mode
-#         self.weights = Raft_Small_Weights.DEFAULT
-#         self.model = raft_small(weights=Raft_Small_Weights.DEFAULT, progress=False).to(device).eval()
-#         self.transforms = self.weights.transforms()     
- 
-#     def compute_raft_flow(self, img1a, img2a, max_size, scale, interp_mode, target_size):
-
-#         origH, origW =  torchvision.transforms.functional.get_image_size(img1a)
-#         current_H, current_W = origH * scale, origW * scale 
-
-#         if max(current_H, current_W) > max_size:
-#             scale = scale * (max_size / float(max(current_H, current_W)))
-
-#         if scale != 1.0:
-#             newH, newW = int(origH * scale), int(origW * scale)
-#             img1b = torch.nn.functional.interpolate(img1a, size=(newH, newW), mode=interp_mode, antialias=True)
-#             img2b = torch.nn.functional.interpolate(img2a, size=(newH, newW), mode=interp_mode, antialias=True)
-#         else:
-#             newH, newW = origH, origW
-#             img1b, img2b = img1a, img2a
-
-#         img1c, img2c = self.transforms(img1b, img2b)
-#         _, _, H_s, W_s = img1c.shape
-#         padh, padw = (8 - H_s % 8) % 8, (8 - W_s % 8) % 8
-
-#         if padh > 0 or padw > 0:
-#             img1c = torch.nn.functional.pad(img1c, (0, padw, 0, padh))
-#             img2c = torch.nn.functional.pad(img2c, (0, padw, 0, padh))
-
-#         flow = self.model(img1c, img2c)[-1].float()
-#         if padh > 0 or padw > 0:
-#             flow = flow[:, :, :H_s, :W_s]
-
-#         out_H, out_W = target_size if target_size else (origH, origW)
-#         if out_H != H_s:
-#             flow = torch.nn.functional.interpolate(flow, size=(out_H, out_W), mode=interp_mode, antialias=True)
-
-#         flow[:, 0] *= (out_W / W_s)
-#         flow[:, 1] *= (out_H / H_s)
-                
-#         return flow
-
-#     def warp_frame(self, a, b, scale=1.0, mode="linear", N=None):
-    
-#         if a.ndim == 3: 
-#             C, H, W = a.shape 
-#         if a.ndim == 4: 
-#             N, C, H, W = a.shape
-        
-#         scaled = b * scale
-#         y, x = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device), indexing='ij')
-#         x_norm = 2.0 * (x + scaled[0]) / max(W - 1, 1) - 1.0
-#         y_norm = 2.0 * (y + scaled[1]) / max(H - 1, 1) - 1.0
-#         grid = torch.stack((x_norm, y_norm), dim=-1).unsqueeze(0)
-#         grid = grid.expand(N, -1, -1, -1) if have(N) else grid
-#         return torch.nn.functional.grid_sample(a, grid, mode=mode, padding_mode='border', align_corners=True) if have(N) else torch.nn.functional.grid_sample(a.unsqueeze(0), grid, mode=mode, padding_mode='border', align_corners=True).squeeze(0)
